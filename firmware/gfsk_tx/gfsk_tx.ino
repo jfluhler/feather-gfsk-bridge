@@ -32,6 +32,7 @@
 // --- Operating modes ---
 #define MODE_RAW    0
 #define MODE_FORMAT 1
+#define MODE_HYBRID 2
 
 // --- Configuration defaults ---
 #define DEFAULT_UART_BAUD  1000000
@@ -55,7 +56,7 @@ const PacketFormat formats[FORMAT_COUNT] = {
 };
 
 // --- Persistent settings ---
-#define SETTINGS_MAGIC 0xBF02
+#define SETTINGS_MAGIC 0xBF03
 
 struct Settings {
   uint16_t magic;
@@ -230,6 +231,50 @@ void drainRaw() {
   digitalWrite(LED, !digitalRead(LED));
 }
 
+void drainHybrid() {
+  // Pack complete hybrid packets from ring into radio frame.
+  // Hybrid packets are self-framing:
+  //   0xFF         -> Type B sync (3 bytes)
+  //   bit7=1       -> Type C group (3 bytes)
+  //   bit7=0       -> Type A single (2 bytes)
+  if (!radio.sendDone()) return;
+
+  uint16_t avail = ringUsed();
+  if (avail == 0) return;
+
+  uint8_t txLen = 0;
+  uint16_t scanPos = 0;
+
+  while (scanPos < avail) {
+    uint8_t b0 = ringPeek(scanPos);
+    uint8_t pLen;
+
+    if (b0 == 0xFF) {
+      pLen = 3;  // Type B sync
+    } else if (b0 & 0x80) {
+      pLen = 3;  // Type C group
+    } else {
+      pLen = 2;  // Type A single
+    }
+
+    if (scanPos + pLen > avail) break;
+    if (txLen + pLen > SX_MAX_PAYLOAD) break;
+
+    for (uint8_t i = 0; i < pLen; i++)
+      txBuf[txLen + i] = ringPeek(scanPos + i);
+
+    txLen += pLen;
+    scanPos += pLen;
+  }
+
+  if (txLen > 0) {
+    ringAdvance(scanPos);
+    radio.sendStart(txBuf, txLen);
+    framesSent++;
+    digitalWrite(LED, !digitalRead(LED));
+  }
+}
+
 // --- Settings management ---
 
 void loadDefaults() {
@@ -255,7 +300,9 @@ void saveSettings() {
 }
 
 const char* modeName() {
-  return config.mode == MODE_FORMAT ? "FORMAT" : "RAW";
+  if (config.mode == MODE_FORMAT) return "FORMAT";
+  if (config.mode == MODE_HYBRID) return "HYBRID";
+  return "RAW";
 }
 
 void printSettings() {
@@ -276,7 +323,8 @@ void printSettings() {
   Serial.println("  ?           Show this help");
   Serial.println("  d           Toggle debug output");
   Serial.println("  b <rate>    Set UART1 baud (e.g. b 1000000)");
-  Serial.println("  m           Toggle mode (RAW/FORMAT)");
+  Serial.println("  m           Cycle mode (RAW/FORMAT/HYBRID)");
+  Serial.println("  h           Set HYBRID mode directly");
   Serial.println("  s           Save settings to flash");
   Serial.println("  r           Reset to defaults");
 }
@@ -312,8 +360,20 @@ void processCommand(const char *cmd) {
     Serial.println("Reset to defaults (use 's' to save)");
   }
   else if (cmd[0] == 'm' || cmd[0] == 'M') {
-    config.mode = (config.mode == MODE_FORMAT) ? MODE_RAW : MODE_FORMAT;
+    // Cycle: RAW -> FORMAT -> HYBRID -> RAW
+    if (config.mode == MODE_RAW) config.mode = MODE_FORMAT;
+    else if (config.mode == MODE_FORMAT) config.mode = MODE_HYBRID;
+    else config.mode = MODE_RAW;
     // Reset parser state when switching modes
+    parseState = WAIT_HEADER;
+    pktIdx = 0;
+    ringHead = 0;
+    ringTail = 0;
+    Serial.print("Mode: "); Serial.println(modeName());
+    Serial.println("Use 's' to save");
+  }
+  else if (cmd[0] == 'h' || cmd[0] == 'H') {
+    config.mode = MODE_HYBRID;
     parseState = WAIT_HEADER;
     pktIdx = 0;
     ringHead = 0;
@@ -383,7 +443,8 @@ void loop() {
                         cmdBuf[0] == '?' || cmdBuf[0] == 's' ||
                         cmdBuf[0] == 'S' || cmdBuf[0] == 'r' ||
                         cmdBuf[0] == 'R' || cmdBuf[0] == 'm' ||
-                        cmdBuf[0] == 'M')) {
+                        cmdBuf[0] == 'M' || cmdBuf[0] == 'h' ||
+                        cmdBuf[0] == 'H')) {
       cmdBuf[1] = '\0';
       processCommand(cmdBuf);
       cmdLen = 0;
@@ -420,6 +481,20 @@ void loop() {
       }
     }
     drainFormatAware();
+  } else if (config.mode == MODE_HYBRID) {
+    // Hybrid: buffer all bytes (packets are self-framing, no validation)
+    while (Serial1.available()) {
+      uint8_t b = Serial1.read();
+      if (ringFree() > 0) {
+        ringWriteByte(b);
+        lastByteMs = millis();
+      } else {
+        pktsDropped++;
+      }
+      uint16_t used = ringUsed();
+      if (used > peakUsed) peakUsed = used;
+    }
+    drainHybrid();
   } else {
     // Raw passthrough: buffer all bytes
     while (Serial1.available()) {
