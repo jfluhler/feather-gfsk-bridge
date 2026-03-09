@@ -143,7 +143,11 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 | `?` | Show status, RSSI, frame count |
 | `d` | Toggle debug hex dump |
 
-See [Configuration Guide](doc/configuration.md) for details.
+See [Configuration Guide](doc/configuration.md) for full command reference,
+default settings, and packet format customization.
+
+See [Hardware Guide](doc/hardware.md) for wiring, antenna, power, and
+troubleshooting.
 
 ## Radio Performance
 
