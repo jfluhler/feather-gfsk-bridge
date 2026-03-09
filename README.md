@@ -4,6 +4,10 @@ Wireless serial bridge using the Adafruit Feather M0 LoRa 900MHz. Bypasses the
 LoRa modem and drives the SX1276/RFM95W in bare-metal GFSK mode for ~12x higher
 throughput than LoRa at comparable range.
 
+The bridge is **protocol-agnostic** — all protocol-specific definitions live in
+two config files (`packet_config.h` for firmware, `packet_formats.json` for the
+logger app). Edit these to match your protocol without modifying any source code.
+
 | Parameter | Value |
 |-----------|-------|
 | Modulation | GFSK (Gaussian BT=0.5) |
@@ -78,8 +82,7 @@ transmits verified packets. Batches multiple packets per radio frame for
 efficiency. Corrupt or unrecognized bytes are discarded before wasting radio
 bandwidth.
 
-The packet format table is defined in `packet_config.h` and can be customized
-for any fixed-length, header-delimited protocol with XOR checksums:
+The packet format table is defined in `firmware/gfsk_tx/packet_config.h`:
 
 ```cpp
 const PacketFormat formats[FORMAT_COUNT] = {
@@ -93,13 +96,33 @@ const PacketFormat formats[FORMAT_COUNT] = {
 
 Self-framing packets whose length is determined by bit patterns in the first
 byte. No header table or checksum validation is needed — the protocol itself
-encodes packet boundaries. Edit `hybridPacketLen()` in `packet_config.h` to
-match your framing scheme.
+encodes packet boundaries. The framing logic is defined in `packet_config.h`:
+
+```cpp
+inline uint8_t hybridPacketLen(uint8_t firstByte) {
+  if (firstByte == 0xFF) return 3;   // sync / overflow
+  if (firstByte & 0x80)  return 3;   // group event
+  return 2;                           // single event
+}
+```
+
+## Customizing for Your Protocol
+
+Two config files control all protocol-specific behavior:
+
+| File | Purpose | Used By |
+|------|---------|---------|
+| `firmware/gfsk_tx/packet_config.h` | Packet table (FORMAT mode) and framing rules (HYBRID mode) | TX firmware |
+| `app/packet_formats.json` | Packet field definitions, checksum config, and hybrid framing | Serial Logger app |
+
+Edit these files to match your protocol. The firmware (`gfsk_tx.ino`), receiver
+(`gfsk_rx.ino`), and logger app (`serial_logger.py`) are all protocol-agnostic
+and do not need modification.
 
 ## Configuration
 
-All settings are configured over USB serial (115200 baud) and can be saved to
-flash memory on the ATSAMD21 so they persist across power cycles.
+All runtime settings are configured over USB serial (115200 baud) and can be
+saved to flash memory on the ATSAMD21 so they persist across power cycles.
 
 ### TX Commands
 
@@ -148,20 +171,21 @@ See [Configuration Guide](doc/configuration.md) for details.
 
 ## Serial Logger App
 
-A standalone Python/tkinter GUI for logging serial data from the RX Feather
-(or any serial device). Features:
+A standalone Python/tkinter GUI for logging and decoding serial data from the
+RX Feather (or any serial device). Features:
 
 - Port and baud rate selection
 - Binary (.bin) or hex text (.log) output
 - Configurable file path and prefix
-- Live hex/ASCII display with auto-scroll
+- Live display modes: Hex, ASCII, Both, and **Decoded**
 - Byte counter and file size tracking
 - **Packet decode view** — parses and displays structured packets in real-time
   with checksum validation, field decoding, and color-coded output
+- Supports both FORMAT and HYBRID decode modes
 
 Packet formats are defined in `app/packet_formats.json`. Edit this file to
-match your protocol — the decoder supports both FORMAT mode (header/length
-table) and HYBRID mode (self-framing) packets.
+match your protocol. The JSON config supports field types including integers,
+hex, bitmasks, bit flags, enumerations, and binary representations.
 
 ![Serial Logger](doc/serial_logger_screenshot.png)
 
@@ -183,7 +207,7 @@ feather-gfsk-bridge/
 │       └── gfsk_rx.ino
 ├── app/
 │   ├── serial_logger.py       # Serial logger GUI with packet decoder
-│   ├── packet_formats.json    # Packet format definitions (edit for your protocol)
+│   ├── packet_formats.json    # Packet decode definitions (edit for your protocol)
 │   └── requirements.txt
 └── doc/
     ├── configuration.md        # Detailed configuration guide
