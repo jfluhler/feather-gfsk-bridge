@@ -156,6 +156,12 @@ A standalone Python/tkinter GUI for logging serial data from the RX Feather
 - Configurable file path and prefix
 - Live hex/ASCII display with auto-scroll
 - Byte counter and file size tracking
+- **Packet decode view** — parses and displays structured packets in real-time
+  with checksum validation, field decoding, and color-coded output
+
+Packet formats are defined in `app/packet_formats.json`. Edit this file to
+match your protocol — the decoder supports both FORMAT mode (header/length
+table) and HYBRID mode (self-framing) packets.
 
 ![Serial Logger](doc/serial_logger_screenshot.png)
 
@@ -176,7 +182,8 @@ feather-gfsk-bridge/
 │   └── gfsk_rx/               # Receiver firmware
 │       └── gfsk_rx.ino
 ├── app/
-│   ├── serial_logger.py       # Standalone serial logger GUI
+│   ├── serial_logger.py       # Serial logger GUI with packet decoder
+│   ├── packet_formats.json    # Packet format definitions (edit for your protocol)
 │   └── requirements.txt
 └── doc/
     ├── configuration.md        # Detailed configuration guide

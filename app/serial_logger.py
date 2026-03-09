@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Standalone Serial Logger — DAQ-agnostic serial data capture to file.
+Standalone Serial Logger — Serial data capture with optional packet decoding.
 
-Logs raw serial data to timestamped files. Works with any serial device
-(LoRa RX, UART bridges, debug consoles, etc.).
+Logs raw serial data to timestamped files. Optionally decodes structured
+packets when a packet_formats.json config file is present. Works with any
+serial device (radio receivers, UART bridges, debug consoles, etc.).
 """
 
+import json
 import os
 import sys
 import threading
@@ -21,6 +23,247 @@ except ImportError:
     print("pyserial is required: pip install pyserial")
     sys.exit(1)
 
+
+# ---------------------------------------------------------------------------
+# Packet Decoder
+# ---------------------------------------------------------------------------
+
+class PacketDecoder:
+    """Stateful packet decoder driven by a JSON format definition."""
+
+    def __init__(self, config_path=None):
+        self.format_packets = {}   # header_byte -> {name, length, fields}
+        self.hybrid_rules = []     # [{match, length, name, ...}]
+        self.hybrid_packets = {}   # name -> {length, fields}
+        self.checksum_type = None
+        self.mode = "format"       # "format", "hybrid", or "raw"
+        self.loaded = False
+
+        # Parser state
+        self._buf = bytearray()
+        self._pkt_expected = 0
+        self._pkt_name = ""
+
+        if config_path and os.path.isfile(config_path):
+            self._load(config_path)
+
+    def _load(self, path):
+        try:
+            with open(path, 'r') as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print("Warning: could not load {}: {}".format(path, e))
+            return
+
+        # Checksum
+        cs = cfg.get("checksum", {})
+        self.checksum_type = cs.get("type")  # "xor" or None
+
+        # Format mode packets
+        fm = cfg.get("format_mode", {})
+        for pkt in fm.get("packets", []):
+            hdr = int(pkt["header"], 16)
+            self.format_packets[hdr] = {
+                "name": pkt["name"],
+                "length": pkt["length"],
+                "fields": pkt.get("fields", []),
+            }
+
+        # Hybrid mode
+        hm = cfg.get("hybrid_mode", {})
+        self.hybrid_rules = hm.get("framing_rules", [])
+        for pkt in hm.get("packets", []):
+            self.hybrid_packets[pkt["name"]] = {
+                "length": pkt["length"],
+                "fields": pkt.get("fields", []),
+            }
+
+        self.loaded = bool(self.format_packets or self.hybrid_rules)
+
+    def set_mode(self, mode):
+        """Set decode mode: 'format', 'hybrid', or 'raw'."""
+        self.mode = mode
+        self.reset()
+
+    def reset(self):
+        self._buf.clear()
+        self._pkt_expected = 0
+        self._pkt_name = ""
+
+    def feed(self, data):
+        """Feed bytes, return list of decoded packet dicts."""
+        if self.mode == "raw" or not self.loaded:
+            return []
+        results = []
+        for b in data:
+            pkts = self._feed_byte(b)
+            results.extend(pkts)
+        return results
+
+    def _feed_byte(self, b):
+        if self.mode == "format":
+            return self._feed_format(b)
+        elif self.mode == "hybrid":
+            return self._feed_hybrid(b)
+        return []
+
+    def _feed_format(self, b):
+        if self._pkt_expected == 0:
+            # Waiting for header
+            info = self.format_packets.get(b)
+            if info:
+                self._buf.clear()
+                self._buf.append(b)
+                self._pkt_expected = info["length"]
+                self._pkt_name = info["name"]
+            return []
+        else:
+            self._buf.append(b)
+            if len(self._buf) >= self._pkt_expected:
+                pkt = self._decode_format_packet()
+                self._pkt_expected = 0
+                self._pkt_name = ""
+                if pkt:
+                    return [pkt]
+            return []
+
+    def _feed_hybrid(self, b):
+        if self._pkt_expected == 0:
+            # Determine packet type from first byte
+            length, name = self._hybrid_match(b)
+            if length == 0:
+                return []  # unknown byte, skip
+            self._buf.clear()
+            self._buf.append(b)
+            self._pkt_expected = length
+            self._pkt_name = name
+            if length == 1:
+                pkt = self._decode_hybrid_packet()
+                self._pkt_expected = 0
+                return [pkt] if pkt else []
+            return []
+        else:
+            self._buf.append(b)
+            if len(self._buf) >= self._pkt_expected:
+                pkt = self._decode_hybrid_packet()
+                self._pkt_expected = 0
+                self._pkt_name = ""
+                if pkt:
+                    return [pkt]
+            return []
+
+    def _hybrid_match(self, b):
+        for rule in self.hybrid_rules:
+            if rule["match"] == "value":
+                val = int(rule["value"], 16)
+                if b == val:
+                    return rule["length"], rule["name"]
+            elif rule["match"] == "bitmask":
+                mask = int(rule["mask"], 16)
+                expect = int(rule["expect"], 16)
+                if (b & mask) == expect:
+                    return rule["length"], rule["name"]
+        return 0, ""
+
+    def _decode_format_packet(self):
+        raw = bytes(self._buf)
+        info = self.format_packets.get(raw[0])
+        if not info:
+            return None
+
+        # Checksum validation
+        valid = True
+        if self.checksum_type == "xor":
+            xor = 0
+            for byte in raw:
+                xor ^= byte
+            valid = (xor == 0)
+
+        fields = self._decode_fields(raw, info["fields"])
+        return {
+            "name": info["name"],
+            "raw": raw,
+            "valid": valid,
+            "fields": fields,
+        }
+
+    def _decode_hybrid_packet(self):
+        raw = bytes(self._buf)
+        info = self.hybrid_packets.get(self._pkt_name)
+        field_defs = info["fields"] if info else []
+        fields = self._decode_fields(raw, field_defs)
+        return {
+            "name": self._pkt_name,
+            "raw": raw,
+            "valid": True,  # hybrid has no per-packet checksum
+            "fields": fields,
+        }
+
+    def _decode_fields(self, raw, field_defs):
+        fields = {}
+        for fd in field_defs:
+            name = fd["name"]
+            offset = fd["offset"]
+            size = fd["size"]
+            fmt = fd.get("format", "hex")
+
+            if offset + size > len(raw):
+                fields[name] = "?"
+                continue
+
+            chunk = raw[offset:offset + size]
+
+            if fmt == "hex":
+                fields[name] = ' '.join('{:02X}'.format(x) for x in chunk)
+            elif fmt == "uint8":
+                fields[name] = chunk[0]
+            elif fmt == "uint16":
+                fields[name] = int.from_bytes(chunk, 'big')
+            elif fmt == "uint32":
+                fields[name] = int.from_bytes(chunk, 'big')
+            elif fmt == "bin":
+                fields[name] = ''.join('{:08b}'.format(x) for x in chunk)
+            elif fmt == "bit":
+                bit_num = fd.get("bit", 0)
+                fields[name] = (chunk[0] >> bit_num) & 1
+            elif fmt == "mask":
+                mask = int(fd.get("mask", "0xFF"), 16)
+                fields[name] = chunk[0] & mask
+            elif fmt == "bits":
+                bit_defs = fd.get("bits", {})
+                active = []
+                for bit_str, label in bit_defs.items():
+                    if chunk[0] & (1 << int(bit_str)):
+                        active.append(label)
+                fields[name] = ', '.join(active) if active else "none"
+            elif fmt == "enum":
+                values = fd.get("values", {})
+                fields[name] = values.get(str(chunk[0]), "unknown({})".format(chunk[0]))
+            else:
+                fields[name] = ' '.join('{:02X}'.format(x) for x in chunk)
+
+            if "unit" in fd and isinstance(fields[name], (int, float)):
+                fields[name] = "{} {}".format(fields[name], fd["unit"])
+
+        return fields
+
+
+def format_packet(pkt):
+    """Format a decoded packet dict into a human-readable string."""
+    cs = "OK" if pkt["valid"] else "BAD"
+    raw_hex = ' '.join('{:02X}'.format(b) for b in pkt["raw"])
+    parts = ["[{}] [{}]".format(pkt["name"], cs)]
+    for k, v in pkt["fields"].items():
+        if k in ("header", "checksum", "marker"):
+            continue
+        parts.append("{}={}".format(k, v))
+    parts.append("({})".format(raw_hex))
+    return ' '.join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Serial Logger (threaded reader)
+# ---------------------------------------------------------------------------
 
 class SerialLogger:
     """Threaded serial reader with file logging."""
@@ -103,32 +346,47 @@ class SerialLogger:
                 pass
 
 
+# ---------------------------------------------------------------------------
+# GUI Application
+# ---------------------------------------------------------------------------
+
 class SerialLoggerApp:
-    """Standalone serial logger GUI."""
+    """Standalone serial logger GUI with optional packet decoding."""
 
     BAUD_RATES = ["9600", "19200", "38400", "57600", "115200",
                   "230400", "460800", "921600", "1000000", "5000000"]
     DISPLAY_HEX = "Hex"
     DISPLAY_ASCII = "ASCII"
     DISPLAY_BOTH = "Both"
+    DISPLAY_DECODED = "Decoded"
 
     def __init__(self, root):
         self.root = root
         self.root.title("Serial Logger")
-        self.root.geometry("750x550")
-        self.root.minsize(600, 400)
+        self.root.geometry("850x600")
+        self.root.minsize(700, 450)
 
         self.serial = SerialLogger()
         self.serial.on_data = self._on_data
         self.serial.on_disconnect = self._on_disconnect
 
+        # Load packet decoder
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(app_dir, "packet_formats.json")
+        self.decoder = PacketDecoder(config_path)
+        self._decode_mode = "format"  # default decode mode
+        self._packet_count = 0
+        self._bad_checksum_count = 0
+
         self._port_map = {}
         self._log_active = False
         self._log_path = None
+        self._hex_log_mode = False
 
         self._build_ui()
         self._refresh_ports()
         self._update_filename_preview()
+        self._update_decode_controls()
 
         # Periodic UI update
         self._poll_stats()
@@ -211,9 +469,23 @@ class SerialLoggerApp:
 
         ttk.Label(disp_toolbar, text="Display:").pack(side=tk.LEFT)
         self._display_var = tk.StringVar(value=self.DISPLAY_BOTH)
-        for mode in [self.DISPLAY_HEX, self.DISPLAY_ASCII, self.DISPLAY_BOTH]:
+        modes = [self.DISPLAY_HEX, self.DISPLAY_ASCII, self.DISPLAY_BOTH]
+        if self.decoder.loaded:
+            modes.append(self.DISPLAY_DECODED)
+        for mode in modes:
             ttk.Radiobutton(disp_toolbar, text=mode, variable=self._display_var,
-                            value=mode).pack(side=tk.LEFT, padx=2)
+                            value=mode, command=self._on_display_mode_change).pack(side=tk.LEFT, padx=2)
+
+        # Decode mode selector (only visible when Decoded is active)
+        self._decode_frame = ttk.Frame(disp_toolbar)
+        ttk.Label(self._decode_frame, text="  Decode:").pack(side=tk.LEFT)
+        self._decode_var = tk.StringVar(value="format")
+        ttk.Radiobutton(self._decode_frame, text="Format", variable=self._decode_var,
+                        value="format", command=self._on_decode_mode_change).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(self._decode_frame, text="Hybrid", variable=self._decode_var,
+                        value="hybrid", command=self._on_decode_mode_change).pack(side=tk.LEFT, padx=2)
+        self._pkt_stats_label = ttk.Label(self._decode_frame, text="")
+        self._pkt_stats_label.pack(side=tk.LEFT, padx=(10, 0))
 
         self._autoscroll_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(disp_toolbar, text="Auto-scroll", variable=self._autoscroll_var).pack(side=tk.LEFT, padx=10)
@@ -222,6 +494,11 @@ class SerialLoggerApp:
         self._text = tk.Text(disp_frame, wrap=tk.WORD, font=("Consolas", 9), height=15,
                              state=tk.DISABLED, bg="#1e1e1e", fg="#d4d4d4",
                              insertbackground="#d4d4d4", selectbackground="#264f78")
+        self._text.tag_configure("pkt_name", foreground="#569cd6")
+        self._text.tag_configure("pkt_ok", foreground="#6a9955")
+        self._text.tag_configure("pkt_bad", foreground="#f44747")
+        self._text.tag_configure("pkt_raw", foreground="#808080")
+        self._text.tag_configure("pkt_field", foreground="#dcdcaa")
         scroll = ttk.Scrollbar(disp_frame, orient=tk.VERTICAL, command=self._text.yview)
         self._text.config(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -230,6 +507,24 @@ class SerialLoggerApp:
         # Status bar
         self._status = ttk.Label(main, text="Disconnected", relief=tk.SUNKEN, anchor=tk.W)
         self._status.pack(fill=tk.X, pady=(5, 0))
+
+    def _update_decode_controls(self):
+        if self._display_var.get() == self.DISPLAY_DECODED and self.decoder.loaded:
+            self._decode_frame.pack(side=tk.LEFT)
+        else:
+            self._decode_frame.pack_forget()
+
+    def _on_display_mode_change(self):
+        self._update_decode_controls()
+        if self._display_var.get() == self.DISPLAY_DECODED:
+            self.decoder.set_mode(self._decode_var.get())
+            self._packet_count = 0
+            self._bad_checksum_count = 0
+
+    def _on_decode_mode_change(self):
+        self.decoder.set_mode(self._decode_var.get())
+        self._packet_count = 0
+        self._bad_checksum_count = 0
 
     def _refresh_ports(self):
         ports = serial.tools.list_ports.comports()
@@ -261,6 +556,9 @@ class SerialLoggerApp:
                 self._connect_btn.config(text="Disconnect")
                 self._conn_indicator.config(fg="#00cc44")
                 self._status.config(text="Connected: {} @ {} baud".format(name, baud))
+                self.decoder.reset()
+                self._packet_count = 0
+                self._bad_checksum_count = 0
             except serial.SerialException as e:
                 messagebox.showerror("Connection Error", str(e))
 
@@ -311,7 +609,6 @@ class SerialLoggerApp:
                 self.serial._log_file.write("# Port: {}, Baud: {}\n".format(
                     self._port_var.get(), self._baud_var.get()))
                 self.serial._log_file.write("#\n")
-                # We'll handle hex writing in _on_data
                 self._hex_log_mode = True
             else:
                 self.serial.start_logging(self._log_path)
@@ -323,7 +620,7 @@ class SerialLoggerApp:
 
     def _on_data(self, data):
         # Write hex to log file if in hex mode
-        if self._log_active and hasattr(self, '_hex_log_mode') and self._hex_log_mode:
+        if self._log_active and self._hex_log_mode:
             if self.serial._log_file:
                 ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 hex_str = data.hex(' ')
@@ -331,8 +628,19 @@ class SerialLoggerApp:
                 self.serial._log_file.flush()
                 self.serial.bytes_logged += len(data)
 
-        # Display in text widget
+        # Build display text
         mode = self._display_var.get()
+
+        if mode == self.DISPLAY_DECODED and self.decoder.loaded:
+            packets = self.decoder.feed(data)
+            if packets:
+                for pkt in packets:
+                    self._packet_count += 1
+                    if not pkt["valid"]:
+                        self._bad_checksum_count += 1
+                    self.root.after(0, lambda p=pkt: self._append_decoded(p))
+            return
+
         if mode == self.DISPLAY_HEX:
             text = data.hex(' ') + ' '
         elif mode == self.DISPLAY_ASCII:
@@ -344,6 +652,37 @@ class SerialLoggerApp:
             text = "{} |{}|\n".format(hex_part, ascii_part)
 
         self.root.after(0, lambda t=text: self._append_text(t))
+
+    def _append_decoded(self, pkt):
+        """Append a decoded packet to the display with color tags."""
+        self._text.config(state=tk.NORMAL)
+
+        # Packet name
+        cs_tag = "pkt_ok" if pkt["valid"] else "pkt_bad"
+        cs_text = "OK" if pkt["valid"] else "BAD CHECKSUM"
+
+        self._text.insert(tk.END, "[{}]".format(pkt["name"]), "pkt_name")
+        self._text.insert(tk.END, " [{}]".format(cs_text), cs_tag)
+
+        # Fields (skip header, checksum, marker)
+        for k, v in pkt["fields"].items():
+            if k in ("header", "checksum", "marker"):
+                continue
+            self._text.insert(tk.END, " {}=".format(k))
+            self._text.insert(tk.END, str(v), "pkt_field")
+
+        # Raw hex
+        raw_hex = ' '.join('{:02X}'.format(b) for b in pkt["raw"])
+        self._text.insert(tk.END, " ({})".format(raw_hex), "pkt_raw")
+        self._text.insert(tk.END, "\n")
+
+        # Trim
+        lines = int(self._text.index('end-1c').split('.')[0])
+        if lines > 5000:
+            self._text.delete('1.0', '{}.0'.format(lines - 5000))
+        if self._autoscroll_var.get():
+            self._text.see(tk.END)
+        self._text.config(state=tk.DISABLED)
 
     def _on_disconnect(self):
         self.root.after(0, self._handle_disconnect)
@@ -370,6 +709,9 @@ class SerialLoggerApp:
         self._text.config(state=tk.NORMAL)
         self._text.delete('1.0', tk.END)
         self._text.config(state=tk.DISABLED)
+        self._packet_count = 0
+        self._bad_checksum_count = 0
+        self.decoder.reset()
 
     def _poll_stats(self):
         if self._log_active:
@@ -383,6 +725,14 @@ class SerialLoggerApp:
             self._stats_label.config(text="Logged: {}".format(size))
         else:
             self._stats_label.config(text="")
+
+        # Packet decode stats
+        if self._display_var.get() == self.DISPLAY_DECODED and self.decoder.loaded:
+            bad = ""
+            if self._bad_checksum_count > 0:
+                bad = "  bad={}".format(self._bad_checksum_count)
+            self._pkt_stats_label.config(text="pkts={}{}".format(self._packet_count, bad))
+
         self.root.after(500, self._poll_stats)
 
     def on_close(self):

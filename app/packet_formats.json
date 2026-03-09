@@ -1,0 +1,108 @@
+{
+  "_comment": "Packet format definitions for the Serial Logger decoder. Edit to match your protocol.",
+
+  "checksum": {
+    "type": "xor",
+    "position": "last",
+    "note": "XOR of all bytes including header; valid packet XORs to 0x00"
+  },
+
+  "format_mode": {
+    "_comment": "Fixed-length packets identified by header byte (FORMAT mode on TX).",
+    "packets": [
+      {
+        "header": "0xA5",
+        "name": "Normal Event",
+        "length": 12,
+        "fields": [
+          { "name": "header",    "offset": 0, "size": 1, "format": "hex" },
+          { "name": "timestamp", "offset": 1, "size": 4, "format": "uint32", "unit": "ticks" },
+          { "name": "state",     "offset": 5, "size": 6, "format": "hex" },
+          { "name": "checksum",  "offset": 11, "size": 1, "format": "hex" }
+        ]
+      },
+      {
+        "header": "0xB5",
+        "name": "Channel Event",
+        "length": 8,
+        "fields": [
+          { "name": "header",    "offset": 0, "size": 1, "format": "hex" },
+          { "name": "timestamp", "offset": 1, "size": 4, "format": "uint32", "unit": "ticks" },
+          { "name": "channel",   "offset": 5, "size": 1, "format": "uint8" },
+          { "name": "state",     "offset": 6, "size": 1, "format": "uint8" },
+          { "name": "checksum",  "offset": 7, "size": 1, "format": "hex" }
+        ]
+      },
+      {
+        "header": "0xC5",
+        "name": "Reduced Summary",
+        "length": 10,
+        "fields": [
+          { "name": "header",      "offset": 0, "size": 1, "format": "hex" },
+          { "name": "channel",     "offset": 1, "size": 1, "format": "uint8" },
+          { "name": "first_time",  "offset": 2, "size": 4, "format": "uint32", "unit": "ticks" },
+          { "name": "count",       "offset": 6, "size": 2, "format": "uint16" },
+          { "name": "final_state", "offset": 8, "size": 1, "format": "uint8" },
+          { "name": "checksum",    "offset": 9, "size": 1, "format": "hex" }
+        ]
+      },
+      {
+        "header": "0xD5",
+        "name": "Status/ACK",
+        "length": 9,
+        "fields": [
+          { "name": "header",     "offset": 0, "size": 1, "format": "hex" },
+          { "name": "status",     "offset": 1, "size": 1, "format": "bits", "bits": {
+              "0": "overflow", "1": "retransmitting", "2": "rate_limited", "3": "pmod_active"
+          }},
+          { "name": "mode",       "offset": 2, "size": 1, "format": "enum", "values": {
+              "0": "Normal", "1": "Channel Event", "2": "SerDes", "3": "Reserved"
+          }},
+          { "name": "fw_major",   "offset": 3, "size": 1, "format": "uint8" },
+          { "name": "fw_minor",   "offset": 4, "size": 1, "format": "uint8" },
+          { "name": "fw_patch",   "offset": 5, "size": 1, "format": "uint8" },
+          { "name": "batt_adc",   "offset": 6, "size": 2, "format": "uint16" },
+          { "name": "checksum",   "offset": 8, "size": 1, "format": "hex" }
+        ]
+      }
+    ]
+  },
+
+  "hybrid_mode": {
+    "_comment": "Self-framing packets whose length is encoded in the first byte (HYBRID mode on TX).",
+    "framing_rules": [
+      { "match": "value",   "value": "0xFF", "length": 3, "name": "Sync/Overflow" },
+      { "match": "bitmask", "mask": "0x80",  "expect": "0x80", "length": 3, "name": "Group Event" },
+      { "match": "bitmask", "mask": "0x80",  "expect": "0x00", "length": 2, "name": "Single Event" }
+    ],
+    "packets": [
+      {
+        "name": "Single Event",
+        "length": 2,
+        "fields": [
+          { "name": "state",   "offset": 0, "size": 1, "format": "bit", "bit": 6 },
+          { "name": "channel", "offset": 0, "size": 1, "format": "mask", "mask": "0x3F" },
+          { "name": "delta_t", "offset": 1, "size": 1, "format": "uint8", "unit": "ticks" }
+        ]
+      },
+      {
+        "name": "Sync/Overflow",
+        "length": 3,
+        "fields": [
+          { "name": "marker",  "offset": 0, "size": 1, "format": "hex" },
+          { "name": "delta_t", "offset": 1, "size": 2, "format": "uint16", "unit": "ticks" }
+        ]
+      },
+      {
+        "name": "Group Event",
+        "length": 3,
+        "fields": [
+          { "name": "state",    "offset": 0, "size": 1, "format": "bit", "bit": 6 },
+          { "name": "base_ch",  "offset": 0, "size": 1, "format": "mask", "mask": "0x3F" },
+          { "name": "bitmap",   "offset": 1, "size": 1, "format": "bin" },
+          { "name": "delta_t",  "offset": 2, "size": 1, "format": "uint8", "unit": "ticks" }
+        ]
+      }
+    ]
+  }
+}
