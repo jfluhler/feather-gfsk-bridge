@@ -133,7 +133,8 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 | `b <rate>` | Set UART1 baud rate (9600 - 5000000) |
 | `m` | Cycle mode (RAW / FORMAT / HYBRID) |
 | `h` | Set HYBRID mode directly |
-| `t` | Run link test (100 frames, reports speed) |
+| `t` | Link test (100 frames, packet loss) |
+| `T` | Throughput test (10s, max speed) |
 | `k <sec>` | Set keepalive interval (0=off, default 30s) |
 | `s` | Save settings to flash |
 | `r` | Reset to defaults |
@@ -145,15 +146,25 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 | `?` | Show status, RSSI, link state |
 | `d` | Toggle debug hex dump |
 
-### Link Test & Keepalive
+### Radio Tests
+
+Two built-in tests verify the wireless link. The RX auto-detects both — no
+manual setup is needed on the receive side.
+
+| Test | TX Command | Duration | Measures |
+|------|-----------|----------|----------|
+| **Link test** | `t` | ~200 ms | Packet loss, RSSI (100 × 32B frames) |
+| **Throughput test** | `T` | 10 seconds | Max sustained throughput (63B frames) |
+
+Typical throughput test result: **22 KB/s (176 kbps)** — 70% of the 250 kbps
+raw bitrate, with the remaining 30% consumed by preamble, sync word, and SPI
+overhead per frame.
+
+### Keepalive
 
 The TX sends a keepalive ping every 30 seconds (configurable via `k`) when
 idle, so the RX can detect whether the link is up. The RX warns if no
 keepalive arrives for 2 minutes.
-
-To test radio performance, run `t` on the TX. The RX auto-detects test
-frames and reports packet loss, average RSSI, and throughput when the test
-completes.
 
 See [Configuration Guide](doc/configuration.md) for full command reference,
 default settings, and packet format customization.

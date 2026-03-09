@@ -46,7 +46,8 @@ Serial Monitor, `screen /dev/ttyACM0 115200`, or the Serial Logger app).
 | `d` | Toggle debug hex dump | No |
 | `m` | Cycle mode (RAW/FORMAT/HYBRID) | No |
 | `h` | Set HYBRID mode directly | No |
-| `t` | Run link test (100 frames) | No |
+| `t` | Link test (100 frames, packet loss) | No |
+| `T` | Throughput test (10s, max speed) | No |
 | `k <sec>` | Set keepalive interval (0=off) | Yes |
 | `s` | Save settings to flash | No |
 | `r` | Reset to defaults | No |
@@ -138,32 +139,58 @@ The RX periodically prints stats prefixed with `#`:
 Lines starting with `#` can be filtered out by the receiving application to
 separate metadata from payload data.
 
-## Link Test
+## Radio Tests
 
-The link test measures radio performance between TX and RX:
+Both tests are auto-detected on the RX — no manual setup is needed on the
+receive side. Test and throughput frames are never forwarded to serial output.
 
-1. Run `t` on the **TX** — it sends 100 × 32-byte test frames with sequence numbers
-2. The RX **auto-detects** test frames and begins collecting statistics
-3. After 3 seconds of no test frames, the RX reports:
-   - Frames received vs expected
-   - Packet loss percentage
-   - Average RSSI (dBm)
-   - Throughput (bytes/sec)
+### Link Test (`t`)
 
-Test frames use a `0xFE` marker byte and are never forwarded to serial output.
-No manual setup is needed on the RX side.
+Sends 100 × 32-byte test frames (`0xFE` marker) with sequence numbers.
+Measures packet loss and average RSSI. Completes in ~200 ms.
+
+```
+t
+```
 
 Example RX output:
 ```
 # --- Link Test: receiving ---
 # --- Link Test Results ---
-#   Frames received: 98
+#   Frames received: 100
 #   Frames expected: 100
-#   Packet loss:     2.0 %
-#   Avg RSSI:        -52 dBm
-#   Throughput:      3136 B/s
+#   Packet loss:     0.0 %
+#   Avg RSSI:        -14 dBm
+#   Throughput:      17977 B/s
+#   Total:           3200 bytes in 178 ms
 # --------------------------
 ```
+
+### Throughput Test (`T`)
+
+Sends maximum-size 63-byte frames (`0xFC` marker) back-to-back for 10
+seconds. Measures sustained throughput at the radio's maximum capacity.
+
+```
+T
+```
+
+Example RX output:
+```
+# --- Throughput Test: receiving ---
+# --- Throughput Test Results ---
+#   Frames received: 3504
+#   Frames expected: 3504
+#   Packet loss:     0.0 %
+#   Avg RSSI:        -13 dBm
+#   Throughput:      22070 B/s (176 kbps)
+#   Total:           220752 bytes in 10002 ms
+# --------------------------
+```
+
+Typical result: **22 KB/s (176 kbps)** — 70% of the 250 kbps raw bitrate.
+The remaining 30% is consumed by per-frame overhead (preamble, sync word,
+SPI FIFO load time, and inter-frame gap).
 
 ## Keepalive
 
