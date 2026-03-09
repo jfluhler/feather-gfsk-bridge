@@ -35,18 +35,20 @@ uint32_t bytesRx = 0;
 uint32_t lastStatusMs = 0;
 bool debugMode = false;
 
-// --- Link test (auto-detect) ---
-#define TEST_MARKER     0xFE
-#define KEEPALIVE_MARKER 0xFD
-#define TEST_IDLE_MS    3000  // report after 3s of no test frames
+// --- Link test & throughput test (auto-detect) ---
+#define TEST_MARKER      0xFE
+#define THROUGHPUT_MARKER 0xFC
+#define KEEPALIVE_MARKER  0xFD
+#define TEST_IDLE_MS     3000  // report after 3s of no test frames
 bool testActive = false;
 uint32_t testStartMs = 0;
 uint32_t testLastMs = 0;
 uint16_t testFrames = 0;
-uint16_t testBytes = 0;
+uint32_t testBytes = 0;
 int32_t testRssiSum = 0;
 uint16_t testSeqMax = 0;
 bool testSeqInit = false;
+bool testIsThroughput = false;
 
 // --- Keepalive tracking ---
 uint32_t lastKeepAliveMs = 0;
@@ -127,18 +129,22 @@ void loop() {
         keepAliveActive = true;
         // Don't forward keepalives to serial output
       }
-      // Check for test frame (auto-detect)
-      else if (len >= 3 && rxBuf[0] == TEST_MARKER) {
+      // Check for test/throughput frame (auto-detect)
+      else if (len >= 3 && (rxBuf[0] == TEST_MARKER || rxBuf[0] == THROUGHPUT_MARKER)) {
+        bool isThroughput = (rxBuf[0] == THROUGHPUT_MARKER);
         if (!testActive) {
           // First test frame — start collecting
           testActive = true;
+          testIsThroughput = isThroughput;
           testStartMs = millis();
           testFrames = 0;
           testBytes = 0;
           testRssiSum = 0;
           testSeqMax = 0;
           testSeqInit = false;
-          Serial.println("# --- Link Test: receiving ---");
+          Serial.print("# --- ");
+          Serial.print(isThroughput ? "Throughput" : "Link");
+          Serial.println(" Test: receiving ---");
         }
         uint16_t seq = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
         testFrames++;
@@ -171,10 +177,12 @@ void loop() {
     }
   }
 
-  // --- Link test auto-report (3s after last test frame) ---
+  // --- Test auto-report (3s after last test frame) ---
   if (testActive && (millis() - testLastMs >= TEST_IDLE_MS)) {
     testActive = false;
-    Serial.println("# --- Link Test Results ---");
+    Serial.print("# --- ");
+    Serial.print(testIsThroughput ? "Throughput" : "Link");
+    Serial.println(" Test Results ---");
     Serial.print("#   Frames received: "); Serial.println(testFrames);
     if (testSeqInit) {
       uint16_t expected = testSeqMax + 1;
@@ -186,9 +194,15 @@ void loop() {
     if (testFrames > 0) {
       int16_t avgRssi = (int16_t)(testRssiSum / testFrames);
       Serial.print("#   Avg RSSI:        "); Serial.print(avgRssi); Serial.println(" dBm");
-      uint32_t elapsed = millis() - testStartMs;
+      uint32_t elapsed = testLastMs - testStartMs;
       uint32_t bps = (elapsed > 0) ? (testBytes * 1000UL / elapsed) : 0;
-      Serial.print("#   Throughput:      "); Serial.print(bps); Serial.println(" B/s");
+      Serial.print("#   Throughput:      "); Serial.print(bps); Serial.print(" B/s");
+      if (testIsThroughput) {
+        Serial.print(" ("); Serial.print(bps * 8UL / 1000UL); Serial.print(" kbps)");
+      }
+      Serial.println();
+      Serial.print("#   Total:           "); Serial.print(testBytes); Serial.print(" bytes in ");
+      Serial.print(elapsed); Serial.println(" ms");
     } else {
       Serial.println("#   No test frames received — check TX is in range");
     }

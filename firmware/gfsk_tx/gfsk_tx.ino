@@ -20,7 +20,8 @@
 //   b <rate>    Set UART1 baud rate (e.g. "b 1000000")
 //   m           Cycle mode (RAW / FORMAT / HYBRID)
 //   h           Set HYBRID mode directly
-//   t           Run link test (100 frames)
+//   t           Link test (100 frames, packet loss)
+//   T           Throughput test (10s, max speed)
 //   k <sec>     Set keepalive interval (0=off, default 30s)
 //   s           Save settings to flash
 //   r           Reset to defaults
@@ -127,9 +128,11 @@ uint8_t cmdLen = 0;
 
 // --- Link test & keepalive ---
 #define TEST_MARKER      0xFE
+#define THROUGHPUT_MARKER 0xFC
 #define KEEPALIVE_MARKER 0xFD
 #define TEST_FRAME_SIZE  32
 #define TEST_FRAME_COUNT 100
+#define THROUGHPUT_DURATION_MS 10000
 uint32_t lastKeepAliveMs = 0;
 
 void runLinkTest() {
@@ -160,7 +163,40 @@ void runLinkTest() {
   Serial.print(" frames, "); Serial.print(totalBytes); Serial.println(" bytes");
   Serial.print("  Time: "); Serial.print(elapsed); Serial.println(" ms");
   Serial.print("  Rate: "); Serial.print(bps); Serial.println(" B/s");
-  Serial.println("  Run 't' on RX within 10s to see results");
+  digitalWrite(LED, LOW);
+}
+
+void runThroughputTest() {
+  Serial.println("--- Throughput Test: 10 seconds, max frame size ---");
+  uint8_t testFrame[SX_MAX_PAYLOAD];
+  testFrame[0] = THROUGHPUT_MARKER;
+  // Fill pattern
+  for (uint8_t i = 3; i < SX_MAX_PAYLOAD; i++)
+    testFrame[i] = i;
+
+  uint32_t t0 = millis();
+  uint32_t totalBytes = 0;
+  uint16_t seq = 0;
+
+  while (millis() - t0 < THROUGHPUT_DURATION_MS) {
+    testFrame[1] = (seq >> 8) & 0xFF;
+    testFrame[2] = seq & 0xFF;
+    while (!radio.sendDone()) { /* spin */ }
+    radio.sendStart(testFrame, SX_MAX_PAYLOAD);
+    totalBytes += SX_MAX_PAYLOAD;
+    framesSent++;
+    seq++;
+    digitalWrite(LED, !digitalRead(LED));
+  }
+  while (!radio.sendDone()) { /* spin */ }
+  uint32_t elapsed = millis() - t0;
+
+  uint32_t bps = (elapsed > 0) ? (totalBytes * 1000UL / elapsed) : 0;
+  Serial.print("  Sent: "); Serial.print(seq);
+  Serial.print(" frames, "); Serial.print(totalBytes); Serial.println(" bytes");
+  Serial.print("  Time: "); Serial.print(elapsed); Serial.println(" ms");
+  Serial.print("  Rate: "); Serial.print(bps); Serial.print(" B/s (");
+  Serial.print(bps * 8UL / 1000UL); Serial.println(" kbps)");
   digitalWrite(LED, LOW);
 }
 
@@ -355,7 +391,8 @@ void printSettings() {
   Serial.println("  h           Set HYBRID mode directly");
   Serial.println("  s           Save settings to flash");
   Serial.println("  r           Reset to defaults");
-  Serial.println("  t           Run link test (100 frames)");
+  Serial.println("  t           Link test (100 frames, packet loss)");
+  Serial.println("  T           Throughput test (10s, max speed)");
   Serial.println("  k <sec>     Set keepalive interval (0=off)");
 }
 
@@ -423,8 +460,11 @@ void processCommand(const char *cmd) {
       Serial.println("Invalid baud (9600-5000000)");
     }
   }
-  else if (cmd[0] == 't' || cmd[0] == 'T') {
+  else if (cmd[0] == 't') {
     runLinkTest();
+  }
+  else if (cmd[0] == 'T') {
+    runThroughputTest();
   }
   else if (cmd[0] == 'k' || cmd[0] == 'K') {
     const char *p = cmd + 1;
@@ -494,7 +534,7 @@ void loop() {
                         cmdBuf[0] == 'R' || cmdBuf[0] == 'm' ||
                         cmdBuf[0] == 'M' || cmdBuf[0] == 'h' ||
                         cmdBuf[0] == 'H' || cmdBuf[0] == 't' ||
-                        cmdBuf[0] == 'T')) {
+                        cmdBuf[0] == 'T' )) {
       cmdBuf[1] = '\0';
       processCommand(cmdBuf);
       cmdLen = 0;
