@@ -17,7 +17,8 @@ Serial Monitor, `screen /dev/ttyACM0 115200`, or the Serial Logger app).
 |---------|-------------|-------------|
 | `?` | Show settings and help | No |
 | `d` | Toggle debug hex dump | No |
-| `m` | Toggle RAW/FORMAT mode | No |
+| `m` | Cycle mode (RAW/FORMAT/HYBRID) | No |
+| `h` | Set HYBRID mode directly | No |
 | `s` | Save settings to flash | No |
 | `r` | Reset to defaults | No |
 | `b <rate>` | Set UART1 baud rate | Yes |
@@ -46,7 +47,7 @@ Common values:
 m
 ```
 
-Toggles between RAW and FORMAT modes:
+Cycles through RAW, FORMAT, and HYBRID modes:
 
 **RAW mode:**
 - All bytes from UART1 are buffered and transmitted as-is
@@ -55,11 +56,17 @@ Toggles between RAW and FORMAT modes:
 - Best for: ASCII text, arbitrary protocols, testing
 
 **FORMAT mode:**
-- Parses bytes looking for known packet headers
+- Parses bytes looking for known packet headers (defined in `packet_config.h`)
 - Validates packet length and XOR checksum before transmitting
 - Batches multiple validated packets per radio frame
 - Discards corrupt or unrecognized bytes
 - Best for: structured binary protocols with fixed-length packets
+
+**HYBRID mode:**
+- Self-framing packets whose length is determined by `hybridPacketLen()` in `packet_config.h`
+- No header table or checksum validation needed
+- Batches complete packets per radio frame
+- Best for: compact, self-describing packet protocols
 
 ### Save / Reset
 
@@ -69,6 +76,8 @@ r       Reset to defaults (1 Mbaud, FORMAT mode)
 ```
 
 After `r`, settings are active but not saved. Use `s` to make them permanent.
+
+Use `h` to switch directly to HYBRID mode without cycling through the others.
 
 ### Debug Mode
 
@@ -102,8 +111,13 @@ separate metadata from payload data.
 
 ## Customizing Packet Formats
 
-To use FORMAT mode with your own protocol, edit the format table in
-`gfsk_tx.ino`:
+All protocol-specific definitions live in `firmware/gfsk_tx/packet_config.h`.
+Edit this file to match your protocol — the main firmware (`gfsk_tx.ino`) is
+protocol-agnostic.
+
+### FORMAT Mode — Packet Table
+
+Define known packet types with their header byte and fixed total length:
 
 ```cpp
 #define FORMAT_COUNT 4
@@ -120,6 +134,21 @@ Requirements:
 - Packet length is fixed (header + payload + 1-byte XOR checksum)
 - Checksum is XOR of all bytes (including header); result should be 0x00
 - Maximum single packet size: 63 bytes (SX1276 FIFO limit minus length prefix)
+
+### HYBRID Mode — Self-Framing Rules
+
+Define how to determine packet length from the first byte:
+
+```cpp
+inline uint8_t hybridPacketLen(uint8_t firstByte) {
+  if (firstByte == 0xFF) return 3;   // sync / overflow
+  if (firstByte & 0x80)  return 3;   // group event
+  return 2;                           // single event
+}
+```
+
+Edit the logic to match your self-framing protocol. The function must return
+the total packet length (including the first byte) for any valid first byte.
 
 ## Factory Defaults
 

@@ -78,16 +78,23 @@ transmits verified packets. Batches multiple packets per radio frame for
 efficiency. Corrupt or unrecognized bytes are discarded before wasting radio
 bandwidth.
 
-The packet format table is defined in `gfsk_tx.ino` and can be customized for
-any fixed-length, header-delimited protocol with XOR checksums:
+The packet format table is defined in `packet_config.h` and can be customized
+for any fixed-length, header-delimited protocol with XOR checksums:
 
 ```cpp
 const PacketFormat formats[FORMAT_COUNT] = {
-  { 0xA5, 12 },  // Example: 12-byte packet starting with 0xA5
-  { 0xB5,  8 },  // Example: 8-byte packet starting with 0xB5
+  { 0xA5, 12 },  // header=0xA5, total length=12 bytes (including checksum)
+  { 0xB5,  8 },
   ...
 };
 ```
+
+### Hybrid
+
+Self-framing packets whose length is determined by bit patterns in the first
+byte. No header table or checksum validation is needed — the protocol itself
+encodes packet boundaries. Edit `hybridPacketLen()` in `packet_config.h` to
+match your framing scheme.
 
 ## Configuration
 
@@ -101,7 +108,8 @@ flash memory on the ATSAMD21 so they persist across power cycles.
 | `?` | Show current settings and help |
 | `d` | Toggle debug hex dump |
 | `b <rate>` | Set UART1 baud rate (9600 - 5000000) |
-| `m` | Toggle mode (RAW / FORMAT) |
+| `m` | Cycle mode (RAW / FORMAT / HYBRID) |
+| `h` | Set HYBRID mode directly |
 | `s` | Save settings to flash |
 | `r` | Reset to defaults |
 
@@ -163,7 +171,8 @@ feather-gfsk-bridge/
 │       └── SX1276FSK.cpp
 ├── firmware/
 │   ├── gfsk_tx/               # Transmitter firmware
-│   │   └── gfsk_tx.ino
+│   │   ├── gfsk_tx.ino
+│   │   └── packet_config.h    # Packet format definitions (edit for your protocol)
 │   └── gfsk_rx/               # Receiver firmware
 │       └── gfsk_rx.ino
 ├── app/

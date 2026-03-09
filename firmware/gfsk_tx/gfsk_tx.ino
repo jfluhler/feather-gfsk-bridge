@@ -4,16 +4,22 @@
 // Receives serial data on UART1 (pins 0/1) and relays it over 250 kbps GFSK
 // radio to a remote receiver using the SX1276/RFM95W transceiver.
 //
-// Two operating modes:
+// Three operating modes:
 //   RAW         Raw byte passthrough with time-based batching
 //   FORMAT      Format-aware: validates packets by header/length/checksum
 //               before transmitting (reduces wasted radio bandwidth)
+//   HYBRID      Self-framing packets whose length is determined by bit
+//               patterns in the first byte (no header table needed)
+//
+// Packet formats for FORMAT and HYBRID modes are defined in packet_config.h.
+// Edit that file to match your protocol.
 //
 // USB Serial Commands (115200 baud):
 //   ?           Show current settings and help
 //   d           Toggle debug output
 //   b <rate>    Set UART1 baud rate (e.g. "b 1000000")
-//   m           Toggle mode (RAW / FORMAT)
+//   m           Cycle mode (RAW / FORMAT / HYBRID)
+//   h           Set HYBRID mode directly
 //   s           Save settings to flash
 //   r           Reset to defaults
 //
@@ -23,6 +29,7 @@
 #include <SPI.h>
 #include <FlashStorage.h>
 #include "SX1276FSK.h"
+#include "packet_config.h"
 
 // --- Feather M0 LoRa pin assignments ---
 #define RFM95_CS   8
@@ -37,23 +44,6 @@
 // --- Configuration defaults ---
 #define DEFAULT_UART_BAUD  1000000
 #define DEFAULT_MODE       MODE_FORMAT
-
-// --- Format-Aware packet table ---
-// Define known packet formats: {header_byte, total_length_including_checksum}
-// The last byte of each packet is assumed to be an XOR checksum.
-// Add/remove entries for your protocol. Set FORMAT_COUNT to match.
-#define FORMAT_COUNT 4
-struct PacketFormat {
-  uint8_t header;
-  uint8_t length;
-};
-
-const PacketFormat formats[FORMAT_COUNT] = {
-  { 0xA5, 12 },  // Normal event (4B timestamp + 6B state + checksum)
-  { 0xB5,  8 },  // Channel event (4B timestamp + channel + state + checksum)
-  { 0xC5, 10 },  // Reduced summary (channel + 4B timestamp + 2B count + state + checksum)
-  { 0xD5,  9 },  // Status/ACK (status + mode + 3B version + 2B ADC + checksum)
-};
 
 // --- Persistent settings ---
 #define SETTINGS_MAGIC 0xBF03
@@ -233,10 +223,7 @@ void drainRaw() {
 
 void drainHybrid() {
   // Pack complete hybrid packets from ring into radio frame.
-  // Hybrid packets are self-framing:
-  //   0xFF         -> Type B sync (3 bytes)
-  //   bit7=1       -> Type C group (3 bytes)
-  //   bit7=0       -> Type A single (2 bytes)
+  // Packet length is determined by hybridPacketLen() in packet_config.h.
   if (!radio.sendDone()) return;
 
   uint16_t avail = ringUsed();
@@ -247,15 +234,7 @@ void drainHybrid() {
 
   while (scanPos < avail) {
     uint8_t b0 = ringPeek(scanPos);
-    uint8_t pLen;
-
-    if (b0 == 0xFF) {
-      pLen = 3;  // Type B sync
-    } else if (b0 & 0x80) {
-      pLen = 3;  // Type C group
-    } else {
-      pLen = 2;  // Type A single
-    }
+    uint8_t pLen = hybridPacketLen(b0);
 
     if (scanPos + pLen > avail) break;
     if (txLen + pLen > SX_MAX_PAYLOAD) break;
