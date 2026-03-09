@@ -20,6 +20,8 @@
 //   b <rate>    Set UART1 baud rate (e.g. "b 1000000")
 //   m           Cycle mode (RAW / FORMAT / HYBRID)
 //   h           Set HYBRID mode directly
+//   t           Run link test (100 frames)
+//   k <sec>     Set keepalive interval (0=off, default 30s)
 //   s           Save settings to flash
 //   r           Reset to defaults
 //
@@ -44,14 +46,16 @@
 // --- Configuration defaults ---
 #define DEFAULT_UART_BAUD  1000000
 #define DEFAULT_MODE       MODE_FORMAT
+#define DEFAULT_KEEPALIVE_SEC 30  // 0 = disabled
 
 // --- Persistent settings ---
-#define SETTINGS_MAGIC 0xBF03
+#define SETTINGS_MAGIC 0xBF04
 
 struct Settings {
   uint16_t magic;
   uint32_t uartBaud;
-  uint8_t  mode;  // MODE_RAW or MODE_FORMAT
+  uint8_t  mode;       // MODE_RAW, MODE_FORMAT, or MODE_HYBRID
+  uint8_t  keepaliveSec; // keepalive interval in seconds (0 = disabled)
 };
 
 FlashStorage(savedSettings, Settings);
@@ -126,7 +130,6 @@ uint8_t cmdLen = 0;
 #define KEEPALIVE_MARKER 0xFD
 #define TEST_FRAME_SIZE  32
 #define TEST_FRAME_COUNT 100
-#define KEEPALIVE_INTERVAL_MS 5000
 uint32_t lastKeepAliveMs = 0;
 
 void runLinkTest() {
@@ -300,6 +303,7 @@ void loadDefaults() {
   config.magic = SETTINGS_MAGIC;
   config.uartBaud = DEFAULT_UART_BAUD;
   config.mode = DEFAULT_MODE;
+  config.keepaliveSec = DEFAULT_KEEPALIVE_SEC;
 }
 
 void loadSettings() {
@@ -330,6 +334,11 @@ void printSettings() {
   Serial.print("  TX mode:    "); Serial.println(modeName());
   Serial.println("  Radio:      250 kbps GFSK, 915 MHz, +20 dBm");
   Serial.print("  Debug:      "); Serial.println(debugMode ? "ON" : "OFF");
+  if (config.keepaliveSec > 0) {
+    Serial.print("  Keepalive:  "); Serial.print(config.keepaliveSec); Serial.println("s");
+  } else {
+    Serial.println("  Keepalive:  OFF");
+  }
   if (config.mode == MODE_FORMAT) {
     Serial.println("  Packet formats:");
     for (uint8_t i = 0; i < FORMAT_COUNT; i++) {
@@ -347,6 +356,7 @@ void printSettings() {
   Serial.println("  s           Save settings to flash");
   Serial.println("  r           Reset to defaults");
   Serial.println("  t           Run link test (100 frames)");
+  Serial.println("  k <sec>     Set keepalive interval (0=off)");
 }
 
 void applyUartBaud() {
@@ -415,6 +425,22 @@ void processCommand(const char *cmd) {
   }
   else if (cmd[0] == 't' || cmd[0] == 'T') {
     runLinkTest();
+  }
+  else if (cmd[0] == 'k' || cmd[0] == 'K') {
+    const char *p = cmd + 1;
+    while (*p == ' ') p++;
+    uint32_t sec = strtoul(p, NULL, 10);
+    if (sec <= 255) {
+      config.keepaliveSec = (uint8_t)sec;
+      if (sec > 0) {
+        Serial.print("Keepalive: "); Serial.print(sec); Serial.println("s");
+      } else {
+        Serial.println("Keepalive: OFF");
+      }
+      Serial.println("Use 's' to save");
+    } else {
+      Serial.println("Invalid (0-255 seconds)");
+    }
   }
   else if (cmd[0] != '\0') {
     Serial.print("Unknown: "); Serial.println(cmd);
@@ -535,8 +561,9 @@ void loop() {
     drainRaw();
   }
 
-  // --- Keepalive ping (every 5 seconds when idle) ---
-  if (millis() - lastKeepAliveMs >= KEEPALIVE_INTERVAL_MS) {
+  // --- Keepalive ping (configurable interval, when idle) ---
+  if (config.keepaliveSec > 0 &&
+      millis() - lastKeepAliveMs >= (uint32_t)config.keepaliveSec * 1000UL) {
     lastKeepAliveMs = millis();
     if (radio.sendDone() && ringUsed() == 0) {
       uint8_t ping[4] = { KEEPALIVE_MARKER, 0x00, 0x00, 0x00 };

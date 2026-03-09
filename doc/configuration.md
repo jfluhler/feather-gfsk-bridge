@@ -21,6 +21,7 @@ logger app do not need modification to support a different protocol.
 | UART1 baud | 1,000,000 (1 Mbaud) | Configurable at runtime via `b` command |
 | Operating mode | FORMAT | Configurable at runtime via `m` command |
 | Debug output | OFF | Configurable at runtime via `d` command |
+| Keepalive interval | 30 seconds | Configurable via `k` command (0 = disabled) |
 | Radio bitrate | 250 kbps | Compiled — edit `SX1276FSK.cpp` to change |
 | Radio frequency | 915 MHz | Compiled — edit `SX1276FSK.cpp` to change |
 | TX power | +20 dBm (100 mW) | Compiled — edit `SX1276FSK.cpp` to change |
@@ -46,6 +47,7 @@ Serial Monitor, `screen /dev/ttyACM0 115200`, or the Serial Logger app).
 | `m` | Cycle mode (RAW/FORMAT/HYBRID) | No |
 | `h` | Set HYBRID mode directly | No |
 | `t` | Run link test (100 frames) | No |
+| `k <sec>` | Set keepalive interval (0=off) | Yes |
 | `s` | Save settings to flash | No |
 | `r` | Reset to defaults | No |
 | `b <rate>` | Set UART1 baud rate | Yes |
@@ -127,7 +129,6 @@ Debug mode adds latency — disable for production use.
 |---------|-------------|
 | `?` | Show status (frames, bytes, RSSI, link state) |
 | `d` | Toggle debug hex dump of received frames |
-| `t` | Start link test listener (10 second window) |
 
 The RX periodically prints stats prefixed with `#`:
 ```
@@ -141,18 +142,20 @@ separate metadata from payload data.
 
 The link test measures radio performance between TX and RX:
 
-1. Run `t` on the **RX** first — it enters a 10-second listening window
-2. Run `t` on the **TX** — it sends 100 × 32-byte test frames with sequence numbers
-3. After 10 seconds, the RX reports:
+1. Run `t` on the **TX** — it sends 100 × 32-byte test frames with sequence numbers
+2. The RX **auto-detects** test frames and begins collecting statistics
+3. After 3 seconds of no test frames, the RX reports:
    - Frames received vs expected
    - Packet loss percentage
    - Average RSSI (dBm)
    - Throughput (bytes/sec)
 
 Test frames use a `0xFE` marker byte and are never forwarded to serial output.
+No manual setup is needed on the RX side.
 
 Example RX output:
 ```
+# --- Link Test: receiving ---
 # --- Link Test Results ---
 #   Frames received: 98
 #   Frames expected: 100
@@ -165,13 +168,16 @@ Example RX output:
 ## Keepalive
 
 The TX sends a 4-byte keepalive ping (`0xFD` marker + 24-bit uptime in
-seconds) every 5 seconds when the radio is idle (no data queued). The RX
-tracks the last keepalive and reports link status:
+seconds) at a configurable interval (default 30 seconds) when the radio is
+idle (no data queued). Use `k <sec>` to change the interval (0 = disabled),
+then `s` to save.
+
+The RX tracks the last keepalive and reports link status:
 
 - `?` output includes `Link: UP (last ping Ns ago, RSSI=X dBm)` or
   `Link: no keepalive received`
 - Periodic stats include `link=UP` when active
-- A warning is printed if no keepalive arrives for 15 seconds:
+- A warning is printed if no keepalive arrives for 2 minutes:
   `# WARN: keepalive lost (TX out of range or powered off)`
 
 Keepalive frames are not forwarded to serial output.

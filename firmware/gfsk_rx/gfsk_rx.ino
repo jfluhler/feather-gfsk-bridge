@@ -9,6 +9,9 @@
 //   ?           Show status and help
 //   d           Toggle debug hex dump
 //
+// Link test frames (0xFE marker) are auto-detected and reported.
+// Keepalive frames (0xFD marker) are tracked for link status.
+//
 // Hardware: Adafruit Feather M0 LoRa 900MHz (ATSAMD21 + RFM95W)
 // =============================================================================
 
@@ -32,12 +35,13 @@ uint32_t bytesRx = 0;
 uint32_t lastStatusMs = 0;
 bool debugMode = false;
 
-// --- Link test ---
+// --- Link test (auto-detect) ---
 #define TEST_MARKER     0xFE
 #define KEEPALIVE_MARKER 0xFD
-bool testMode = false;
+#define TEST_IDLE_MS    3000  // report after 3s of no test frames
+bool testActive = false;
 uint32_t testStartMs = 0;
-#define TEST_DURATION_MS 10000
+uint32_t testLastMs = 0;
 uint16_t testFrames = 0;
 uint16_t testBytes = 0;
 int32_t testRssiSum = 0;
@@ -101,18 +105,8 @@ void loop() {
       } else {
         Serial.println("#   Link:   no keepalive received");
       }
-      Serial.println("#   Commands: d=debug, t=link test, ?=help");
-    } else if (c == 't' || c == 'T') {
-      // Start link test — listen for test frames for 10 seconds
-      testMode = true;
-      testStartMs = millis();
-      testFrames = 0;
-      testBytes = 0;
-      testRssiSum = 0;
-      testSeqMax = 0;
-      testSeqInit = false;
-      Serial.println("# --- Link Test: listening for 10 seconds ---");
-      Serial.println("# Run 't' on TX now");
+      Serial.println("#   Commands: d=debug, ?=help");
+      Serial.println("#   Link test: auto-detected when TX sends 't'");
     }
   }
 
@@ -133,17 +127,27 @@ void loop() {
         keepAliveActive = true;
         // Don't forward keepalives to serial output
       }
-      // Check for test frame
+      // Check for test frame (auto-detect)
       else if (len >= 3 && rxBuf[0] == TEST_MARKER) {
-        if (testMode) {
-          uint16_t seq = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
-          testFrames++;
-          testBytes += len;
-          testRssiSum += rssi;
-          if (!testSeqInit || seq > testSeqMax) {
-            testSeqMax = seq;
-            testSeqInit = true;
-          }
+        if (!testActive) {
+          // First test frame — start collecting
+          testActive = true;
+          testStartMs = millis();
+          testFrames = 0;
+          testBytes = 0;
+          testRssiSum = 0;
+          testSeqMax = 0;
+          testSeqInit = false;
+          Serial.println("# --- Link Test: receiving ---");
+        }
+        uint16_t seq = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
+        testFrames++;
+        testBytes += len;
+        testRssiSum += rssi;
+        testLastMs = millis();
+        if (!testSeqInit || seq > testSeqMax) {
+          testSeqMax = seq;
+          testSeqInit = true;
         }
         // Don't forward test frames to serial output
       }
@@ -167,9 +171,9 @@ void loop() {
     }
   }
 
-  // --- Link test timeout ---
-  if (testMode && (millis() - testStartMs >= TEST_DURATION_MS)) {
-    testMode = false;
+  // --- Link test auto-report (3s after last test frame) ---
+  if (testActive && (millis() - testLastMs >= TEST_IDLE_MS)) {
+    testActive = false;
     Serial.println("# --- Link Test Results ---");
     Serial.print("#   Frames received: "); Serial.println(testFrames);
     if (testSeqInit) {
@@ -191,8 +195,8 @@ void loop() {
     Serial.println("# --------------------------");
   }
 
-  // --- Keepalive timeout check ---
-  if (keepAliveActive && (millis() - lastKeepAliveMs > 15000)) {
+  // --- Keepalive timeout check (2 minutes = ~4 missed pings at 30s) ---
+  if (keepAliveActive && (millis() - lastKeepAliveMs > 120000)) {
     keepAliveActive = false;
     Serial.println("# WARN: keepalive lost (TX out of range or powered off)");
   }

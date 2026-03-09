@@ -134,6 +134,7 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 | `m` | Cycle mode (RAW / FORMAT / HYBRID) |
 | `h` | Set HYBRID mode directly |
 | `t` | Run link test (100 frames, reports speed) |
+| `k <sec>` | Set keepalive interval (0=off, default 30s) |
 | `s` | Save settings to flash |
 | `r` | Reset to defaults |
 
@@ -143,17 +144,16 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 |---------|-------------|
 | `?` | Show status, RSSI, link state |
 | `d` | Toggle debug hex dump |
-| `t` | Listen for link test (10 second window) |
 
 ### Link Test & Keepalive
 
-The TX sends a 4-byte keepalive ping every 5 seconds when idle, so the RX
-can detect whether the link is up. The RX warns if no keepalive arrives for
-15 seconds.
+The TX sends a keepalive ping every 30 seconds (configurable via `k`) when
+idle, so the RX can detect whether the link is up. The RX warns if no
+keepalive arrives for 2 minutes.
 
-To test radio performance, run `t` on both sides (RX first, then TX). The TX
-sends 100 test frames; the RX reports packet loss, average RSSI, and
-throughput.
+To test radio performance, run `t` on the TX. The RX auto-detects test
+frames and reports packet loss, average RSSI, and throughput when the test
+completes.
 
 See [Configuration Guide](doc/configuration.md) for full command reference,
 default settings, and packet format customization.
