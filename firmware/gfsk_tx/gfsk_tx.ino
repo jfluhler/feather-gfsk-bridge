@@ -121,6 +121,46 @@ uint32_t lastByteMs = 0;
 char cmdBuf[32];
 uint8_t cmdLen = 0;
 
+// --- Link test & keepalive ---
+#define TEST_MARKER      0xFE
+#define KEEPALIVE_MARKER 0xFD
+#define TEST_FRAME_SIZE  32
+#define TEST_FRAME_COUNT 100
+#define KEEPALIVE_INTERVAL_MS 5000
+uint32_t lastKeepAliveMs = 0;
+
+void runLinkTest() {
+  Serial.println("--- Link Test: sending 100 frames ---");
+  uint8_t testFrame[TEST_FRAME_SIZE];
+  testFrame[0] = TEST_MARKER;
+  // Fill pattern
+  for (uint8_t i = 3; i < TEST_FRAME_SIZE; i++)
+    testFrame[i] = i;
+
+  uint32_t t0 = millis();
+  for (uint16_t seq = 0; seq < TEST_FRAME_COUNT; seq++) {
+    testFrame[1] = (seq >> 8) & 0xFF;
+    testFrame[2] = seq & 0xFF;
+    // Wait for previous TX to finish
+    while (!radio.sendDone()) { /* spin */ }
+    radio.sendStart(testFrame, TEST_FRAME_SIZE);
+    framesSent++;
+    digitalWrite(LED, !digitalRead(LED));
+  }
+  // Wait for last frame to finish
+  while (!radio.sendDone()) { /* spin */ }
+  uint32_t elapsed = millis() - t0;
+
+  uint32_t totalBytes = (uint32_t)TEST_FRAME_COUNT * TEST_FRAME_SIZE;
+  uint32_t bps = (elapsed > 0) ? (totalBytes * 1000UL / elapsed) : 0;
+  Serial.print("  Sent: "); Serial.print(TEST_FRAME_COUNT);
+  Serial.print(" frames, "); Serial.print(totalBytes); Serial.println(" bytes");
+  Serial.print("  Time: "); Serial.print(elapsed); Serial.println(" ms");
+  Serial.print("  Rate: "); Serial.print(bps); Serial.println(" B/s");
+  Serial.println("  Run 't' on RX within 10s to see results");
+  digitalWrite(LED, LOW);
+}
+
 // --- Format-aware helpers ---
 
 uint8_t formatPacketLen(uint8_t header) {
@@ -306,6 +346,7 @@ void printSettings() {
   Serial.println("  h           Set HYBRID mode directly");
   Serial.println("  s           Save settings to flash");
   Serial.println("  r           Reset to defaults");
+  Serial.println("  t           Run link test (100 frames)");
 }
 
 void applyUartBaud() {
@@ -372,6 +413,9 @@ void processCommand(const char *cmd) {
       Serial.println("Invalid baud (9600-5000000)");
     }
   }
+  else if (cmd[0] == 't' || cmd[0] == 'T') {
+    runLinkTest();
+  }
   else if (cmd[0] != '\0') {
     Serial.print("Unknown: "); Serial.println(cmd);
     Serial.println("Send '?' for help");
@@ -423,7 +467,8 @@ void loop() {
                         cmdBuf[0] == 'S' || cmdBuf[0] == 'r' ||
                         cmdBuf[0] == 'R' || cmdBuf[0] == 'm' ||
                         cmdBuf[0] == 'M' || cmdBuf[0] == 'h' ||
-                        cmdBuf[0] == 'H')) {
+                        cmdBuf[0] == 'H' || cmdBuf[0] == 't' ||
+                        cmdBuf[0] == 'T')) {
       cmdBuf[1] = '\0';
       processCommand(cmdBuf);
       cmdLen = 0;
@@ -488,6 +533,20 @@ void loop() {
       if (used > peakUsed) peakUsed = used;
     }
     drainRaw();
+  }
+
+  // --- Keepalive ping (every 5 seconds when idle) ---
+  if (millis() - lastKeepAliveMs >= KEEPALIVE_INTERVAL_MS) {
+    lastKeepAliveMs = millis();
+    if (radio.sendDone() && ringUsed() == 0) {
+      uint8_t ping[4] = { KEEPALIVE_MARKER, 0x00, 0x00, 0x00 };
+      // Encode uptime in seconds (bytes 1-3, 24-bit)
+      uint32_t upSec = millis() / 1000;
+      ping[1] = (upSec >> 16) & 0xFF;
+      ping[2] = (upSec >> 8) & 0xFF;
+      ping[3] = upSec & 0xFF;
+      radio.sendStart(ping, 4);
+    }
   }
 
   // --- Periodic stats (every 5 seconds) ---

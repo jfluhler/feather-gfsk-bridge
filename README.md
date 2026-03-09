@@ -133,6 +133,7 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 | `b <rate>` | Set UART1 baud rate (9600 - 5000000) |
 | `m` | Cycle mode (RAW / FORMAT / HYBRID) |
 | `h` | Set HYBRID mode directly |
+| `t` | Run link test (100 frames, reports speed) |
 | `s` | Save settings to flash |
 | `r` | Reset to defaults |
 
@@ -140,8 +141,19 @@ saved to flash memory on the ATSAMD21 so they persist across power cycles.
 
 | Command | Description |
 |---------|-------------|
-| `?` | Show status, RSSI, frame count |
+| `?` | Show status, RSSI, link state |
 | `d` | Toggle debug hex dump |
+| `t` | Listen for link test (10 second window) |
+
+### Link Test & Keepalive
+
+The TX sends a 4-byte keepalive ping every 5 seconds when idle, so the RX
+can detect whether the link is up. The RX warns if no keepalive arrives for
+15 seconds.
+
+To test radio performance, run `t` on both sides (RX first, then TX). The TX
+sends 100 test frames; the RX reports packet loss, average RSSI, and
+throughput.
 
 See [Configuration Guide](doc/configuration.md) for full command reference,
 default settings, and packet format customization.

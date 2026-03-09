@@ -45,6 +45,7 @@ Serial Monitor, `screen /dev/ttyACM0 115200`, or the Serial Logger app).
 | `d` | Toggle debug hex dump | No |
 | `m` | Cycle mode (RAW/FORMAT/HYBRID) | No |
 | `h` | Set HYBRID mode directly | No |
+| `t` | Run link test (100 frames) | No |
 | `s` | Save settings to flash | No |
 | `r` | Reset to defaults | No |
 | `b <rate>` | Set UART1 baud rate | Yes |
@@ -124,16 +125,56 @@ Debug mode adds latency — disable for production use.
 
 | Command | Description |
 |---------|-------------|
-| `?` | Show status (frames, bytes, RSSI) |
+| `?` | Show status (frames, bytes, RSSI, link state) |
 | `d` | Toggle debug hex dump of received frames |
+| `t` | Start link test listener (10 second window) |
 
 The RX periodically prints stats prefixed with `#`:
 ```
-# RX: frames=142 bytes=8520 RSSI=-45 dBm
+# RX: frames=142 bytes=8520 RSSI=-45 link=UP dBm
 ```
 
 Lines starting with `#` can be filtered out by the receiving application to
 separate metadata from payload data.
+
+## Link Test
+
+The link test measures radio performance between TX and RX:
+
+1. Run `t` on the **RX** first — it enters a 10-second listening window
+2. Run `t` on the **TX** — it sends 100 × 32-byte test frames with sequence numbers
+3. After 10 seconds, the RX reports:
+   - Frames received vs expected
+   - Packet loss percentage
+   - Average RSSI (dBm)
+   - Throughput (bytes/sec)
+
+Test frames use a `0xFE` marker byte and are never forwarded to serial output.
+
+Example RX output:
+```
+# --- Link Test Results ---
+#   Frames received: 98
+#   Frames expected: 100
+#   Packet loss:     2.0 %
+#   Avg RSSI:        -52 dBm
+#   Throughput:      3136 B/s
+# --------------------------
+```
+
+## Keepalive
+
+The TX sends a 4-byte keepalive ping (`0xFD` marker + 24-bit uptime in
+seconds) every 5 seconds when the radio is idle (no data queued). The RX
+tracks the last keepalive and reports link status:
+
+- `?` output includes `Link: UP (last ping Ns ago, RSSI=X dBm)` or
+  `Link: no keepalive received`
+- Periodic stats include `link=UP` when active
+- A warning is printed if no keepalive arrives for 15 seconds:
+  `# WARN: keepalive lost (TX out of range or powered off)`
+
+Keepalive frames are not forwarded to serial output.
 
 ## Customizing Packet Formats
 

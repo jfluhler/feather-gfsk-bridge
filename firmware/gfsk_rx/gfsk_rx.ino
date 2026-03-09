@@ -32,6 +32,23 @@ uint32_t bytesRx = 0;
 uint32_t lastStatusMs = 0;
 bool debugMode = false;
 
+// --- Link test ---
+#define TEST_MARKER     0xFE
+#define KEEPALIVE_MARKER 0xFD
+bool testMode = false;
+uint32_t testStartMs = 0;
+#define TEST_DURATION_MS 10000
+uint16_t testFrames = 0;
+uint16_t testBytes = 0;
+int32_t testRssiSum = 0;
+uint16_t testSeqMax = 0;
+bool testSeqInit = false;
+
+// --- Keepalive tracking ---
+uint32_t lastKeepAliveMs = 0;
+int16_t keepAliveRssi = 0;
+bool keepAliveActive = false;
+
 void printHex(uint8_t b) {
   if (b < 0x10) Serial.print('0');
   Serial.print(b, HEX);
@@ -77,7 +94,25 @@ void loop() {
       Serial.print("#   Frames: "); Serial.println(framesRx);
       Serial.print("#   Bytes:  "); Serial.println(bytesRx);
       Serial.print("#   RSSI:   "); Serial.print(radio.lastRssi()); Serial.println(" dBm");
-      Serial.println("#   Commands: d=debug, ?=help");
+      if (keepAliveActive) {
+        uint32_t age = (millis() - lastKeepAliveMs) / 1000;
+        Serial.print("#   Link:   UP (last ping "); Serial.print(age); Serial.print("s ago, RSSI=");
+        Serial.print(keepAliveRssi); Serial.println(" dBm)");
+      } else {
+        Serial.println("#   Link:   no keepalive received");
+      }
+      Serial.println("#   Commands: d=debug, t=link test, ?=help");
+    } else if (c == 't' || c == 'T') {
+      // Start link test — listen for test frames for 10 seconds
+      testMode = true;
+      testStartMs = millis();
+      testFrames = 0;
+      testBytes = 0;
+      testRssiSum = 0;
+      testSeqMax = 0;
+      testSeqInit = false;
+      Serial.println("# --- Link Test: listening for 10 seconds ---");
+      Serial.println("# Run 't' on TX now");
     }
   }
 
@@ -86,16 +121,41 @@ void loop() {
     uint8_t len = radio.receive(rxBuf, sizeof(rxBuf));
 
     if (len > 0) {
+      int16_t rssi = radio.lastRssi();
       framesRx++;
       bytesRx += len;
       digitalWrite(LED, HIGH);
 
-      // Forward raw payload to USB serial
-      Serial.write(rxBuf, len);
+      // Check for keepalive frame
+      if (len >= 4 && rxBuf[0] == KEEPALIVE_MARKER) {
+        lastKeepAliveMs = millis();
+        keepAliveRssi = rssi;
+        keepAliveActive = true;
+        // Don't forward keepalives to serial output
+      }
+      // Check for test frame
+      else if (len >= 3 && rxBuf[0] == TEST_MARKER) {
+        if (testMode) {
+          uint16_t seq = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
+          testFrames++;
+          testBytes += len;
+          testRssiSum += rssi;
+          if (!testSeqInit || seq > testSeqMax) {
+            testSeqMax = seq;
+            testSeqInit = true;
+          }
+        }
+        // Don't forward test frames to serial output
+      }
+      else {
+        // Forward normal payload to USB serial
+        Serial.write(rxBuf, len);
+      }
 
-      // Debug: hex dump to USB serial (prefixed with # so it's distinguishable)
+      // Debug: hex dump (prefixed with # so it's distinguishable)
       if (debugMode) {
-        Serial.print("\n# RX ["); Serial.print(len); Serial.print("B]: ");
+        Serial.print("\n# RX ["); Serial.print(len); Serial.print("B RSSI=");
+        Serial.print(rssi); Serial.print("]: ");
         for (uint8_t i = 0; i < len; i++) {
           printHex(rxBuf[i]);
           Serial.print(' ');
@@ -107,12 +167,45 @@ void loop() {
     }
   }
 
+  // --- Link test timeout ---
+  if (testMode && (millis() - testStartMs >= TEST_DURATION_MS)) {
+    testMode = false;
+    Serial.println("# --- Link Test Results ---");
+    Serial.print("#   Frames received: "); Serial.println(testFrames);
+    if (testSeqInit) {
+      uint16_t expected = testSeqMax + 1;
+      uint16_t lost = (expected > testFrames) ? expected - testFrames : 0;
+      float lossP = (expected > 0) ? (lost * 100.0f / expected) : 0;
+      Serial.print("#   Frames expected: "); Serial.println(expected);
+      Serial.print("#   Packet loss:     "); Serial.print(lossP, 1); Serial.println(" %");
+    }
+    if (testFrames > 0) {
+      int16_t avgRssi = (int16_t)(testRssiSum / testFrames);
+      Serial.print("#   Avg RSSI:        "); Serial.print(avgRssi); Serial.println(" dBm");
+      uint32_t elapsed = millis() - testStartMs;
+      uint32_t bps = (elapsed > 0) ? (testBytes * 1000UL / elapsed) : 0;
+      Serial.print("#   Throughput:      "); Serial.print(bps); Serial.println(" B/s");
+    } else {
+      Serial.println("#   No test frames received — check TX is in range");
+    }
+    Serial.println("# --------------------------");
+  }
+
+  // --- Keepalive timeout check ---
+  if (keepAliveActive && (millis() - lastKeepAliveMs > 15000)) {
+    keepAliveActive = false;
+    Serial.println("# WARN: keepalive lost (TX out of range or powered off)");
+  }
+
   // --- Periodic stats (every 5 seconds) ---
   if (millis() - lastStatusMs > 5000) {
     lastStatusMs = millis();
     Serial.print("# RX: frames="); Serial.print(framesRx);
     Serial.print(" bytes="); Serial.print(bytesRx);
     Serial.print(" RSSI="); Serial.print(radio.lastRssi());
+    if (keepAliveActive) {
+      Serial.print(" link=UP");
+    }
     Serial.println(" dBm");
   }
 }
