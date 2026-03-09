@@ -50,7 +50,7 @@ struct PacketFormat {
 
 const PacketFormat formats[FORMAT_COUNT] = {
   { 0xA5, 12 },  // Normal event (4B timestamp + 6B state + checksum)
-  { 0xB5,  8 },  // Low-data event (4B timestamp + channel + state + checksum)
+  { 0xB5,  8 },  // Channel event (4B timestamp + channel + state + checksum)
   { 0xC5, 10 },  // Reduced summary (channel + 4B timestamp + 2B count + state + checksum)
   { 0xD5,  9 },  // Status/ACK (status + mode + 3B version + 2B ADC + checksum)
 };
